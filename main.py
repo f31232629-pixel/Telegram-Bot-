@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import uuid
+import random
 import aiohttp
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Any, Awaitable
@@ -10,14 +11,10 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-
-# 👇 IMPORTING YOUR AUTO-POST MODULE
-from autopost import start_auto_poster, generate_random_card, get_local_bin_data
 
 # ==========================================
 # 1. CONFIGURATION & EXECUTIVE INFO
@@ -27,7 +24,6 @@ OWNER_ID = 8570832903
 OWNER_USERNAME = "@theaadikoder"
 EXECUTIVE_NAME = "Aditya Thakur"
 
-USE_PYTHONANYWHERE_PROXY = True
 redeem_cooldowns = {}
 bg_tasks = set()
 
@@ -86,7 +82,7 @@ async def ensure_user_registered(user_id: int, username: str, bot: Bot = None):
     def register_user(users):
         if uid_str not in users:
             users[uid_str] = {"username": safe_username, "role": "owner" if user_id == OWNER_ID else "user", "banned": False, "join_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "redeem_count": 0}
-            is_new[0] = True
+            is_new = True
         else:
             if user_id == OWNER_ID: users[uid_str]["role"], users[uid_str]["banned"] = "owner", False
             if "join_date" not in users[uid_str]: users[uid_str]["join_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -94,12 +90,12 @@ async def ensure_user_registered(user_id: int, username: str, bot: Bot = None):
         return users
 
     await modify_db("users.json", register_user)
-    if is_new[0] and bot and user_id != OWNER_ID: await notify_owner(bot, f"🔔 **System Alert**\n\n👤 **New User:** `{user_id}` (@{safe_username})")
-    return is_new[0]
+    if is_new and bot and user_id != OWNER_ID: await notify_owner(bot, f"🔔 **System Alert**\n\n👤 **New User:** `{user_id}` (@{safe_username})")
+    return is_new
 
 def parse_chat_id(cid: str):
     cid_str = str(cid).strip()
-    if "t.me/" in cid_str: cid_str = "@" + cid_str.split("t.me/")[-1].split("/")[0]
+    if "t.me/" in cid_str: cid_str = "@" + cid_str.split("t.me/")[-1].split("/")
     try: return int(cid_str)
     except ValueError:
         if not cid_str.startswith("@") and not cid_str.startswith("-100"): cid_str = "@" + cid_str
@@ -215,8 +211,8 @@ async def redeem_center_ui(call: CallbackQuery):
         cat_items = list(categories.items())
         for i in range(0, len(cat_items), 2):
             row = []
-            row.append(InlineKeyboardButton(text=f"{cat_items[i][0]} ({cat_items[i][1]})", callback_data=f"ui_redeem_{cat_items[i][0]}"))
-            if i + 1 < len(cat_items): row.append(InlineKeyboardButton(text=f"{cat_items[i+1][0]} ({cat_items[i+1][1]})", callback_data=f"ui_redeem_{cat_items[i+1][0]}"))
+            row.append(InlineKeyboardButton(text=f"{cat_items[i]} ({cat_items[i]})", callback_data=f"ui_redeem_{cat_items[i]}"))
+            if i + 1 < len(cat_items): row.append(InlineKeyboardButton(text=f"{cat_items[i+1]} ({cat_items[i+1]})", callback_data=f"ui_redeem_{cat_items[i+1]}"))
             kb_rows.append(row)
 
     kb_rows.append([InlineKeyboardButton(text="🔄 Refresh", callback_data="user_redeem_center")])
@@ -226,6 +222,10 @@ async def redeem_center_ui(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("ui_redeem_"))
 async def process_ui_redeem(call: CallbackQuery, bot: Bot):
     user_id = call.from_user.id
+    now = datetime.now()
+    expired = [uid for uid, time in redeem_cooldowns.items() if time < now]
+    for uid in expired: del redeem_cooldowns[uid]
+
     if user_id in redeem_cooldowns and datetime.now() < redeem_cooldowns[user_id]: return await call.answer("⏳ Rate Limited: Please wait 3 seconds.", show_alert=True)
     redeem_cooldowns[user_id] = datetime.now() + timedelta(seconds=3)
 
@@ -235,13 +235,13 @@ async def process_ui_redeem(call: CallbackQuery, bot: Bot):
     def process_redemption(stocks):
         for stock in stocks:
             if stock["category"].upper() == category.upper() and not stock.get("redeemed"):
-                stock["redeemed"], stock["redeemed_by"], found_stock[0] = True, user_id, stock
+                stock["redeemed"], stock["redeemed_by"], found_stock = True, user_id, stock
                 break
         return stocks
 
     await modify_db("stocks.json", process_redemption)
 
-    if found_stock[0]:
+    if found_stock:
         def increment_user_stats(users):
             if str(user_id) in users: users[str(user_id)]["redeem_count"] = users[str(user_id)].get("redeem_count", 0) + 1
             return users
@@ -250,7 +250,7 @@ async def process_ui_redeem(call: CallbackQuery, bot: Bot):
         await call.answer(f"❌ {category} is out of stock!", show_alert=True)
         return await redeem_center_ui(call)
 
-    stock_data = found_stock[0]
+    stock_data = found_stock
     await log_action("ui_redeem", user_id, f"Redeemed {category}: {stock_data['id']}")
     try:
         await bot.send_message(chat_id=user_id, text=f"✅ **Secure Redemption Successful**\n\n> **Category:** `{stock_data['category']}`\n> **Item Data:** `{stock_data['item']}`\n\n⚠️ *Please secure this data immediately.*")
@@ -263,7 +263,12 @@ async def process_ui_redeem(call: CallbackQuery, bot: Bot):
 async def redeem_stock_cmd(message: Message, bot: Bot):
     args = message.text.split()
     if len(args) < 2: return await message.answer("⚠️ **Usage:** `/redeem [category]`")
-    category, user_id = args[1], message.from_user.id
+    category, user_id = args, message.from_user.id
+    
+    now = datetime.now()
+    expired = [uid for uid, time in redeem_cooldowns.items() if time < now]
+    for uid in expired: del redeem_cooldowns[uid]
+
     if user_id in redeem_cooldowns and datetime.now() < redeem_cooldowns[user_id]: return await message.answer("⏳ **Rate Limited:** Wait 3 seconds.")
     redeem_cooldowns[user_id] = datetime.now() + timedelta(seconds=3)
 
@@ -271,20 +276,20 @@ async def redeem_stock_cmd(message: Message, bot: Bot):
     def process_redemption(stocks):
         for stock in stocks:
             if stock["category"].lower() == category.lower() and not stock.get("redeemed"):
-                stock["redeemed"], stock["redeemed_by"], found_stock[0] = True, user_id, stock
+                stock["redeemed"], stock["redeemed_by"], found_stock = True, user_id, stock
                 break
         return stocks
 
     await modify_db("stocks.json", process_redemption)
 
-    if found_stock[0]:
+    if found_stock:
         def increment_user_stats(users):
             if str(user_id) in users: users[str(user_id)]["redeem_count"] = users[str(user_id)].get("redeem_count", 0) + 1
             return users
         await modify_db("users.json", increment_user_stats)
     else: return await message.answer(f"❌ Sorry, `{category}` is currently out of stock.")
 
-    stock_data = found_stock[0]
+    stock_data = found_stock
     await log_action("cmd_redeem", user_id, f"Redeemed {category}: {stock_data['id']}")
     await message.answer(f"✅ **Secure Redemption Successful**\n\n> **Category:** `{stock_data['category']}`\n> **Item Data:** `{stock_data['item']}`")
 
@@ -376,7 +381,7 @@ async def show_export_panel(call: CallbackQuery):
 async def handle_exports(call: CallbackQuery):
     if call.from_user.id != OWNER_ID: return
     await call.answer("Compiling database node...", show_alert=False)
-    action = call.data.split("_")[1]
+    action = call.data.split("_")
     content, filename = "", f"DB_{action.capitalize()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
 
     if action == "users":
@@ -404,9 +409,6 @@ async def handle_exports(call: CallbackQuery):
     if not content.strip() or "===" not in content: content = "No data records found in this node."
     await call.message.answer_document(document=BufferedInputFile(content.encode('utf-8'), filename=filename), caption=f"✅ **Database Export Compiled:** `{filename}`")
 
-# ==========================================
-# 7. CLEAN ADMIN SETTINGS PANEL UI
-# ==========================================
 @dp.callback_query(F.data == "panel_commands")
 async def show_commands(call: CallbackQuery):
     if call.from_user.id != OWNER_ID: return
@@ -437,28 +439,28 @@ async def show_commands(call: CallbackQuery):
 async def add_admin(message: Message, bot: Bot):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
-    if len(args) < 2 or not args[1].lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/addadmin [User ID]`")
+    if len(args) < 2 or not args.lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/addadmin [User ID]`")
 
     def promote_user(users):
-        if args[1] in users:
-            users[args[1]]["role"] = "admin"
+        if args in users:
+            users[args]["role"] = "admin"
             return users
         return None
-    if await modify_db("users.json", promote_user): await message.answer(f"✅ User `{args[1]}` is now an Admin.")
+    if await modify_db("users.json", promote_user): await message.answer(f"✅ User `{args}` is now an Admin.")
     else: await message.answer("❌ **Error:** Identity not found.")
 
 @dp.message(Command("removeadmin"))
 async def remove_admin(message: Message, bot: Bot):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
-    if len(args) < 2 or not args[1].lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/removeadmin [User ID]`")
+    if len(args) < 2 or not args.lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/removeadmin [User ID]`")
 
     def demote_user(users):
-        if args[1] in users:
-            users[args[1]]["role"] = "user"
+        if args in users:
+            users[args]["role"] = "user"
             return users
         return None
-    if await modify_db("users.json", demote_user): await message.answer(f"⬇️ User `{args[1]}` demoted.")
+    if await modify_db("users.json", demote_user): await message.answer(f"⬇️ User `{args}` demoted.")
     else: await message.answer("❌ **Error:** Identity not found.")
 
 @dp.message(Command("addgroup"))
@@ -467,19 +469,19 @@ async def add_group(message: Message):
     args = message.text.split()
     if len(args) < 2: return await message.answer("⚠️ **Syntax Error:** `/addgroup [Group ID]`")
     def append_group(groups):
-        groups.append({"group_id": args[1]})
+        groups.append({"group_id": args})
         return groups
     await modify_db("groups.json", append_group)
-    await message.answer(f"✅ **Network Updated:** Group `{args[1]}` linked.")
+    await message.answer(f"✅ **Network Updated:** Group `{args}` linked.")
 
 @dp.message(Command("removegroup"))
 async def remove_group(message: Message):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
     if len(args) < 2: return await message.answer("⚠️ **Syntax Error:** `/removegroup [Group ID]`")
-    def drop_group(groups): return [g for g in groups if str(g["group_id"]) != args[1]]
+    def drop_group(groups): return [g for g in groups if str(g["group_id"]) != args]
     await modify_db("groups.json", drop_group)
-    await message.answer(f"🗑️ Group `{args[1]}` unlinked.")
+    await message.answer(f"🗑️ Group `{args}` unlinked.")
 
 @dp.message(Command("addchannel"))
 async def add_force_channel(message: Message):
@@ -487,44 +489,44 @@ async def add_force_channel(message: Message):
     args = message.text.split()
     if len(args) < 3: return await message.answer("⚠️ **Syntax Error:** `/addchannel [Channel ID] [Invite Link]`")
     def append_channel(channels):
-        channels.append({"channel_id": args[1], "link": args[2]})
+        channels.append({"channel_id": args, "link": args})
         return channels
     await modify_db("channels.json", append_channel)
-    await message.answer(f"✅ Force channel linked.\n> ID: `{args[1]}`\n> Link: {args[2]}")
+    await message.answer(f"✅ Force channel linked.\n> ID: `{args}`\n> Link: {args}")
 
 @dp.message(Command("removechannel"))
 async def remove_force_channel(message: Message):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
     if len(args) < 2: return await message.answer("⚠️ **Syntax Error:** `/removechannel [Channel ID]`")
-    def drop_channel(channels): return [ch for ch in channels if str(ch["channel_id"]) != args[1]]
+    def drop_channel(channels): return [ch for ch in channels if str(ch["channel_id"]) != args]
     await modify_db("channels.json", drop_channel)
-    await message.answer(f"🗑️ Channel `{args[1]}` unlinked.")
+    await message.answer(f"🗑️ Channel `{args}` unlinked.")
 
 @dp.message(Command("ban"))
 async def ban_user(message: Message, bot: Bot):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
-    if len(args) < 2 or not args[1].lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/ban [User ID]`")
+    if len(args) < 2 or not args.lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/ban [User ID]`")
     def restrict_user(users):
-        if args[1] in users:
-            users[args[1]]["banned"] = True
+        if args in users:
+            users[args]["banned"] = True
             return users
         return None
-    if await modify_db("users.json", restrict_user): await message.answer(f"🔨 `{args[1]}` banned globally.")
+    if await modify_db("users.json", restrict_user): await message.answer(f"🔨 `{args}` banned globally.")
     else: await message.answer("❌ **Error:** Identity not found.")
 
 @dp.message(Command("unban"))
 async def unban_user(message: Message, bot: Bot):
     if message.from_user.id != OWNER_ID: return
     args = message.text.split()
-    if len(args) < 2 or not args[1].lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/unban [User ID]`")
+    if len(args) < 2 or not args.lstrip('-').isdigit(): return await message.answer("⚠️ **Syntax Error:** `/unban [User ID]`")
     def restore_user(users):
-        if args[1] in users:
-            users[args[1]]["banned"] = False
+        if args in users:
+            users[args]["banned"] = False
             return users
         return None
-    if await modify_db("users.json", restore_user): await message.answer(f"🕊️ `{args[1]}` restored.")
+    if await modify_db("users.json", restore_user): await message.answer(f"🕊️ `{args}` restored.")
     else: await message.answer("❌ **Error:** Identity not found.")
 
 @dp.message(Command("broadcast"))
@@ -560,11 +562,11 @@ async def add_stock(message: Message):
     if len(args) < 3: return await message.answer("⚠️ `/addstock [Category] [Details]`")
 
     def insert_stock(stocks):
-        stocks.append({"id": str(uuid.uuid4()), "category": args[1], "item": args[2], "redeemed": False, "redeemed_by": None, "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        stocks.append({"id": str(uuid.uuid4()), "category": args, "item": args, "redeemed": False, "redeemed_by": None, "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         return stocks
 
     await modify_db("stocks.json", insert_stock)
-    await message.answer(f"✅ **Inventory Updated:** New asset deployed to `{args[1]}`.")
+    await message.answer(f"✅ **Inventory Updated:** New asset deployed to `{args}`.")
 
 # --- DYNAMIC AUTO-POST SETTINGS CONTROL ---
 @dp.message(Command("setautochannel"))
@@ -576,10 +578,10 @@ async def cmd_set_auto_channel(message: Message):
     if len(args) < 2: return await message.answer("⚠️ **Syntax:** `/setautochannel [Channel ID / @username]`")
 
     def update_channel(s):
-        s["auto_post_channel"] = args[1]
+        s["auto_post_channel"] = args
         return s
     await modify_db("settings.json", update_channel)
-    await message.answer(f"✅ **Auto-Post Channel Updated:** `{args[1]}`\n\n_Tip: Use `/testpost` to verify if the bot can send messages there._")
+    await message.answer(f"✅ **Auto-Post Channel Updated:** `{args}`\n\n_Tip: Use `/testpost` to verify if the bot can send messages there._")
 
 @dp.message(Command("setinterval"))
 async def cmd_set_auto_interval(message: Message):
@@ -589,7 +591,7 @@ async def cmd_set_auto_interval(message: Message):
     args = message.text.split()
     if len(args) < 2: return await message.answer("⚠️ **Syntax:** `/setinterval [Time]`\n\n**Examples:**\n`/setinterval 30m` *(30 Minutes)*\n`/setinterval 2h` *(2 Hours)*")
 
-    time_str = args[1].lower()
+    time_str = args.lower()
     try:
         if time_str.endswith('m'):
             val = int(time_str[:-1])
@@ -621,7 +623,7 @@ async def cmd_set_auto_limit(message: Message):
     if len(args) < 2: return await message.answer("⚠️ **Syntax:** `/setautolimit [Number]`\nExample: `/setautolimit 50`")
 
     try:
-        limit = int(args[1])
+        limit = int(args)
         def update_limit(s):
             s["daily_limit"] = limit
             return s
@@ -677,15 +679,113 @@ async def cmd_test_post(message: Message, bot: Bot):
         await status_msg.edit_text(f"❌ **Test Failed!**\n\n**System Error:** `{e}`")
 
 # ==========================================
+# 9. INTERNAL OFFLINE BIN ENGINE
+# ==========================================
+def get_local_bin_data(bin_str):
+    prefix = bin_str
+    schemes = {'4': 'Visa', '5': 'Mastercard', '6': 'Discover', '2': 'Mastercard', '3': 'American Express'}
+    scheme = schemes.get(prefix, "Unknown")
+    c_type = random.choice(["Credit", "Debit", "Prepaid"])
+    
+    banks = ["JPMorgan Chase", "Bank of America", "Wells Fargo", "Citibank", "HSBC", "Barclays", "Capital One", "Standard Chartered", "American Express", "TD Bank", "Royal Bank of Canada"]
+    bank_name = random.choice(banks) if scheme != 'American Express' else "American Express"
+    
+    countries = [("United States", "🇺🇸"), ("United Kingdom", "🇬🇧"), ("Canada", "🇨🇦"), ("Australia", "🇦🇺"), ("Germany", "🇩🇪"), ("France", "🇫🇷"), ("Japan", "🇯🇵"), ("Switzerland", "🇨🇭"), ("India", "🇮🇳")]
+    country_name, flag = random.choice(countries)
+    
+    return scheme, c_type, bank_name, country_name, flag
+
+def generate_random_card():
+    prefixes = ['4', '5', '6', '2', '3']
+    prefix = random.choice(prefixes)
+    length = 15 if prefix == '3' else 16
+    
+    bin_str = prefix + ''.join([str(random.randint(0, 9)) for _ in range(5)])
+    rest_of_card = ''.join([str(random.randint(0, 9)) for _ in range(length - 6)])
+    card_number = bin_str + rest_of_card
+    
+    month = f"{random.randint(1, 12):02d}"
+    year = str(random.randint(2025, 2032))
+    cvv = ''.join([str(random.randint(0, 9)) for _ in range(4 if prefix == '3' else 3)])
+
+    return bin_str, f"{card_number}|{month}|{year}|{cvv}"
+
+async def auto_post_task(bot: Bot):
+    await asyncio.sleep(5)
+    logging.info("⚙️ Smart Auto-Post Task Started (Tick Engine)...")
+    
+    while True:
+        try:
+            await asyncio.sleep(5) 
+            
+            settings = await read_db("settings.json")
+            channel_id = settings.get("auto_post_channel")
+            interval = settings.get("auto_post_interval", 120) 
+            daily_limit = settings.get("daily_limit", 50)
+            last_ts = settings.get("last_post_timestamp", 0)
+            
+            if not channel_id or channel_id == "None":
+                continue
+
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+
+            if settings.get("last_post_date") != today:
+                def reset_day(s):
+                    s["last_post_date"] = today
+                    s["daily_post_count"] = 0
+                    return s
+                settings = await modify_db("settings.json", reset_day)
+
+            if settings.get("daily_post_count", 0) >= daily_limit:
+                continue
+
+            current_ts = now.timestamp()
+            if (current_ts - last_ts) < interval:
+                continue 
+
+            bin_str, card_format = generate_random_card()
+            scheme, c_type, bank_name, country_name, flag = get_local_bin_data(bin_str)
+
+            text = (
+                f"[💎] Card ➜ `{card_format}`\n"
+                f"━━━━━━━━━━━\n"
+                f"[ﾒ] Info ➜ {scheme} - {c_type}\n"
+                f"[ﾒ] Bank ➜ {bank_name}\n"
+                f"[ﾒ] Country ➜ {country_name} {flag}"
+            )
+
+            try:
+                target_chat = parse_chat_id(channel_id)
+                await bot.send_message(chat_id=target_chat, text=text)
+                logging.info(f"✅ Auto-posted Mocked BIN {bin_str}")
+                
+                def update_post_stats(s):
+                    s["daily_post_count"] = s.get("daily_post_count", 0) + 1
+                    s["last_post_timestamp"] = datetime.now().timestamp()
+                    return s
+                await modify_db("settings.json", update_post_stats)
+                
+            except Exception as e:
+                err_msg = str(e)
+                logging.error(f"❌ Failed to post: {err_msg}")
+                await notify_owner(bot, f"⚠️ **Auto-Post Blocked!**\n\nBot couldn't post to the channel.\n**Reason:** `{err_msg}`\n\nEnsure bot is admin in `{channel_id}`.")
+                
+                def update_fail_ts(s):
+                    s["last_post_timestamp"] = datetime.now().timestamp()
+                    return s
+                await modify_db("settings.json", update_fail_ts)
+            
+        except Exception as e:
+            logging.error(f"⚠️ Loop Error: {e}")
+
+# ==========================================
 # 10. KEEP-ALIVE WEB SERVER
 # ==========================================
 async def handle_ping(request):
     return web.Response(text="Bot is awake and running 24/7!")
 
 async def run_dummy_server():
-    if USE_PYTHONANYWHERE_PROXY:
-        logging.info("🌐 Keep-alive server is disabled on PythonAnywhere to prevent port crash.")
-        return
     try:
         app = web.Application()
         app.router.add_get('/', handle_ping)
@@ -699,12 +799,8 @@ async def run_dummy_server():
         logging.error(f"🌐 Dummy Server Skipped: {e}")
 
 # ==========================================
-# 11. ENGINE IGNITION (WITH ANTI-CRASH)
+# 11. ENGINE IGNITION (RENDER DEPLOYMENT)
 # ==========================================
-class PythonAnywhereSession(AiohttpSession):
-    async def create_session(self) -> aiohttp.ClientSession:
-        return aiohttp.ClientSession(trust_env=True)
-
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     init_db()
@@ -712,40 +808,30 @@ async def main():
 
     await ensure_user_registered(OWNER_ID, OWNER_USERNAME.replace("@", ""), None)
 
-    if USE_PYTHONANYWHERE_PROXY:
-        os.environ["http_proxy"] = "http://proxy.server:3128"
-        os.environ["https_proxy"] = "http://proxy.server:3128"
-        os.environ["HTTP_PROXY"] = "http://proxy.server:3128"
-        os.environ["HTTPS_PROXY"] = "http://proxy.server:3128"
-        session = PythonAnywhereSession()
-        print("🔄 Connecting via PythonAnywhere Proxy...")
-    else:
-        session = AiohttpSession()
-        print("🔄 Connecting directly (Render/VPS mode)...")
+    # 1. Start Aiogram Bot (Direct Connection - No Proxy Needed for Render)
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 
-    bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="Markdown"))
-
-    # 🌐 Launch Background Web Server securely
+    # 2. Launch Background Web Server securely (Keeps Render Alive)
     task1 = asyncio.create_task(run_dummy_server())
     bg_tasks.add(task1)
     task1.add_done_callback(bg_tasks.discard)
 
-    # 🌟 Launch Smart Auto-Poster securely from autopost.py!
-    task2 = asyncio.create_task(start_auto_poster(bot, read_db, modify_db, parse_chat_id, notify_owner))
+    # 3. Launch Smart Auto-Poster securely 
+    task2 = asyncio.create_task(auto_post_task(bot))
     bg_tasks.add(task2)
     task2.add_done_callback(bg_tasks.discard)
 
     print(f"🚀 Premium Enterprise Engine Online! Executive Access: {OWNER_USERNAME}")
     await notify_owner(bot, "🟢 **System Online:** Platform Reboot Successful.")
 
-    # 🛡️ INFINITE ANTI-CRASH RESURRECTION LOOP
+    # 4. INFINITE ANTI-CRASH RESURRECTION LOOP
     while True:
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(bot)
         except Exception as e:
-            logging.error(f"⚠️ Proxy/Network Error (503): {e}")
-            logging.info("🔄 Auto-Reconnecting in 5 seconds to bypass proxy limits...")
+            logging.error(f"⚠️ Network Error: {e}")
+            logging.info("🔄 Auto-Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
